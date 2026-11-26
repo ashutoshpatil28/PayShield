@@ -1,0 +1,14 @@
+package com.payshield.provider;
+
+public enum SimulatorFailureMode {
+    NORMAL_SUCCESS,
+    DECLINE,
+    DELAYED_RESPONSE,
+    TIMEOUT_AFTER_PROCESSING,
+    TIMEOUT_BEFORE_PROCESSING,
+    UNAVAILABLE,
+    DUPLICATE_WEBHOOK,
+    DELAYED_WEBHOOK,
+    INVALID_RESPONSE,
+    INTERMITTENT_ERRORS
+}

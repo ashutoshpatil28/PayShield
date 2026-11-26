@@ -1,0 +1,127 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { RotateCcw } from 'lucide-react';
+import { apiFetch } from '../lib/api';
+import { formatMinorMoney, formatUtcTimestamp } from '../lib/format';
+import { useAuth } from '../lib/auth';
+
+interface AccountBalance {
+  accountId: string;
+  accountCode: string;
+  accountName: string;
+  accountType: string;
+  currency: string;
+  balanceMinor: number;
+}
+
+interface JournalTx {
+  id: string;
+  referenceCode: string;
+  description: string;
+  currency: string;
+  reversalOfTxId: string | null;
+  createdBy: string;
+  createdAt: string;
+  lines: Array<{
+    id: string;
+    accountCode: string;
+    accountName: string;
+    entryType: 'DEBIT' | 'CREDIT';
+    amountMinor: number;
+    currency: string;
+  }>;
+}
+
+export function LedgerPage() {
+  const { hasRole } = useAuth();
+  const qc = useQueryClient();
+
+  const { data: balances } = useQuery({
+    queryKey: ['ledger-balances'],
+    queryFn: () => apiFetch<AccountBalance[]>('/api/v1/ledger/balances'),
+  });
+
+  const { data: txs } = useQuery({
+    queryKey: ['ledger-txs'],
+    queryFn: () => apiFetch<{ items: JournalTx[] }>('/api/v1/ledger/transactions?size=30'),
+  });
+
+  const reverseMutation = useMutation({
+    mutationFn: (txId: string) =>
+      apiFetch(`/api/v1/ledger/transactions/${txId}/reverse`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: 'Manual reversal via Ledger Explorer' }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ledger-balances'] });
+      qc.invalidateQueries({ queryKey: ['ledger-txs'] });
+    },
+  });
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">Double-Entry Financial Ledger</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Immutable journal transactions (SUM(DEBIT) == SUM(CREDIT)) and real-time account balances
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {balances?.map((b) => (
+          <div key={b.accountId} className="bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 rounded-xl p-4">
+            <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>{b.accountType}</span>
+              <span className="font-mono">{b.currency}</span>
+            </div>
+            <div className="font-medium text-sm">{b.accountName}</div>
+            <div className="text-xl font-semibold tabular-nums mt-2">{formatMinorMoney(b.balanceMinor, b.currency)}</div>
+            <div className="text-[11px] font-mono text-slate-500 truncate mt-1">{b.accountCode}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-3">
+        <h2 className="text-sm font-semibold">Journal Transactions</h2>
+        {txs?.items.length === 0 && (
+          <div className="p-6 rounded-xl bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 text-sm text-slate-500">
+            No journal entries posted yet. Initiate a payment or execute a payout to see balanced postings.
+          </div>
+        )}
+        {txs?.items.map((tx) => (
+          <div key={tx.id} className="bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 rounded-xl p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="font-mono text-xs font-semibold">{tx.referenceCode}</div>
+                <div className="text-xs text-slate-500">
+                  {tx.description} • {tx.createdBy} • {formatUtcTimestamp(tx.createdAt)}
+                </div>
+              </div>
+              {hasRole('PLATFORM_ADMIN') && !tx.reversalOfTxId && (
+                <button
+                  type="button"
+                  onClick={() => reverseMutation.mutate(tx.id)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 dark:border-navy-700 text-xs hover:bg-slate-100 dark:hover:bg-navy-800"
+                >
+                  <RotateCcw className="w-3 h-3" /> Post Reversal
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+              {tx.lines.map((l) => (
+                <div key={l.id} className="p-2 rounded bg-slate-50 dark:bg-navy-950 flex items-center justify-between">
+                  <div>
+                    <span className={`font-semibold mr-2 ${l.entryType === 'DEBIT' ? 'text-sky-500' : 'text-emerald-500'}`}>
+                      {l.entryType}
+                    </span>
+                    <span className="font-mono">{l.accountName}</span>
+                  </div>
+                  <span className="tabular-nums font-medium">{formatMinorMoney(l.amountMinor, l.currency)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

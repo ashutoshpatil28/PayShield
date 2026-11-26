@@ -1,0 +1,11 @@
+package com.payshield.reconciliation;
+
+public enum ExceptionCategory {
+    MISSING_TRANSACTION,
+    DUPLICATE_TRANSACTION,
+    AMOUNT_MISMATCH,
+    CURRENCY_MISMATCH,
+    FEE_MISMATCH,
+    DELAYED_SETTLEMENT,
+    UNKNOWN_PROVIDER_REFERENCE
+}

@@ -1,0 +1,56 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: payshield-backend
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/payshield}
+    username: ${POSTGRES_USER:payshield}
+    password: ${POSTGRES_PASSWORD:payshield_dev_pass}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+payshield:
+  security:
+    jwt-secret: ${PAYSHIELD_JWT_SECRET:payshield-dev-only-jwt-secret-key-change-me-32chars}
+    access-token-ttl-seconds: ${PAYSHIELD_JWT_ACCESS_TTL_SECONDS:900}
+    refresh-token-ttl-seconds: ${PAYSHIELD_JWT_REFRESH_TTL_SECONDS:604800}
+    cors-allowed-origins: ${PAYSHIELD_CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+    seed-demo-data: ${PAYSHIELD_SEED_DEMO_DATA:true}
+  webhooks:
+    alpha-secret: ${PAYSHIELD_WEBHOOK_SECRET_ALPHA:dev-webhook-secret-alpha-change-me}
+    beta-secret: ${PAYSHIELD_WEBHOOK_SECRET_BETA:dev-webhook-secret-beta-change-me}
+    gamma-secret: ${PAYSHIELD_WEBHOOK_SECRET_GAMMA:dev-webhook-secret-gamma-change-me}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
