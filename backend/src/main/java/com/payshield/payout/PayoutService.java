@@ -29,6 +29,7 @@ public class PayoutService {
 
     private static final long PER_TX_LIMIT_MINOR = 50_000_00L;   // ₹500,000.00
     private static final long DAILY_LIMIT_MINOR = 200_000_00L;   // ₹2,000,000.00
+    private static final long VELOCITY_MAX_IN_15M = 10L;
 
     private final BeneficiaryRepository beneficiaryRepository;
     private final PayoutRequestRepository payoutRepository;
@@ -114,6 +115,14 @@ public class PayoutService {
             throw new DomainException("PAYOUT_PER_TX_LIMIT_EXCEEDED",
                     "Payout exceeds per-transaction limit of " + PER_TX_LIMIT_MINOR + " minor units",
                     HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+
+        long recentCount = payoutRepository.countByMerchantIdAndCreatedAtAfter(
+                req.merchantId(), Instant.now().minus(15, ChronoUnit.MINUTES));
+        if (recentCount >= VELOCITY_MAX_IN_15M) {
+            throw new DomainException("PAYOUT_VELOCITY_LIMIT_EXCEEDED",
+                    "Merchant payout velocity threshold exceeded in 15-minute window",
+                    HttpStatus.TOO_MANY_REQUESTS);
         }
 
         long dailyUsed = payoutRepository.sumMerchantDailyVolume(
@@ -262,6 +271,46 @@ public class PayoutService {
                     .map(BeneficiaryEntity::getBeneficiaryName).orElse("Unknown");
             return toDto(req, benName);
         }));
+    }
+
+    public record CreateBeneficiaryRequest(
+            @NotNull UUID merchantId,
+            @NotBlank String beneficiaryName,
+            @NotBlank String accountNumberMasked,
+            @NotBlank String ifscOrRouting
+    ) {}
+
+    @Transactional
+    public BeneficiaryEntity createBeneficiary(CreateBeneficiaryRequest req, PayShieldUserPrincipal actor, String ip) {
+        merchantService.requireMerchantAccess(actor, req.merchantId());
+        merchantService.requireActiveMerchant(req.merchantId());
+        BeneficiaryEntity ben = beneficiaryRepository.save(new BeneficiaryEntity(
+                UUID.randomUUID(),
+                req.merchantId(),
+                req.beneficiaryName().trim(),
+                req.accountNumberMasked().trim(),
+                req.ifscOrRouting().trim().toUpperCase(),
+                false, // New beneficiaries require explicit allowlisting
+                false,
+                Instant.now()
+        ));
+        auditService.record(actor.getUserId(), actor.getEmail(), String.join(",", actor.getRoles()),
+                "BENEFICIARY_CREATED", "BENEFICIARY", ben.getId().toString(), AuditOutcome.SUCCESS, ip, null);
+        return ben;
+    }
+
+    @Transactional
+    public BeneficiaryEntity setBeneficiaryAllowlist(UUID beneficiaryId, boolean allowlisted,
+                                                     PayShieldUserPrincipal actor, String ip) {
+        BeneficiaryEntity ben = beneficiaryRepository.findById(beneficiaryId)
+                .orElseThrow(() -> new DomainException("BENEFICIARY_NOT_FOUND",
+                        "Beneficiary not found", HttpStatus.NOT_FOUND));
+        ben.setAllowlisted(allowlisted);
+        beneficiaryRepository.save(ben);
+        auditService.record(actor.getUserId(), actor.getEmail(), String.join(",", actor.getRoles()),
+                "BENEFICIARY_ALLOWLIST_UPDATED", "BENEFICIARY", beneficiaryId.toString(),
+                AuditOutcome.SUCCESS, ip, "{\"allowlisted\":" + allowlisted + "}");
+        return ben;
     }
 
     @Transactional(readOnly = true)

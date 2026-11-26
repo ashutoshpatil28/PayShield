@@ -1,42 +1,47 @@
-# PayShield — System Architecture Overview
+# PayShield — System Architecture Overview (C4, Modules & Risks)
 
-## 1. Architectural Style
-PayShield is structured as a **modular monolith** in Java 21 / Spring Boot 3.4 paired with a **React + TypeScript** Operations Console and **PostgreSQL** as the system of record.
+## 1. C4 Context Architecture
 
-A modular monolith was chosen over microservices so that critical financial invariants—such as persisting a payment state change alongside its `outbox_events` row, or posting a balanced double-entry `journal_transaction`—execute within a single ACID database transaction without distributed two-phase commit complexity.
+```mermaid
+flowchart TB
+    MerchantAdmin["Merchant Admin\n(Initiates payments, views merchant-scoped data)"]
+    OpsAnalyst["Operations & Risk Analysts\n(Monitors providers, reconciliation, risk alerts)"]
+    PayoutTeam["Payout Maker & Checker\n(Requests & approves payouts with SoD)"]
+    Auditor["Financial Auditor\n(Read-only ledger & audit trail review)"]
+    PlatformAdmin["Platform Admin\n(Users, roles, kill switch, simulator config)"]
+
+    PayShield["PayShield Platform\n(Enterprise Payment Ops & Infrastructure Simulation)"]
+
+    SimProviders["Simulated Payment Providers\n(PROVIDER_ALPHA, PROVIDER_BETA, PROVIDER_GAMMA)\nNo real banks or card networks"]
+    CsvSource["Synthetic Settlement CSVs\n(External settlement reports)"]
+
+    MerchantAdmin --> PayShield
+    OpsAnalyst --> PayShield
+    PayoutTeam --> PayShield
+    Auditor --> PayShield
+    PlatformAdmin --> PayShield
+
+    PayShield <-->|"Simulated Charge, Verify & Signed Webhooks"| SimProviders
+    CsvSource -->|"CSV Upload"| PayShield
+```
 
 ---
 
-## 2. High-Level System Diagram
+## 2. C4 Container Architecture
 
 ```mermaid
 flowchart LR
-    UI["React Operations Console\n(Vite + TS + Tailwind)"] -->|HTTPS / REST + JWT| API["Spring Boot API Gateway\n& Security Filter Chain"]
-
-    subgraph Backend ["PayShield Modular Monolith (Java 21)"]
-        API --> Auth["auth"]
-        API --> Merchant["merchant"]
-        API --> Payment["payment"]
-        API --> Webhook["webhook"]
-        API --> Payout["payout"]
-        API --> Ledger["ledger"]
-        API --> Recon["reconciliation"]
-        API --> Risk["risk"]
-        API --> Ops["ops"]
-
-        Payment --> Provider["provider\n(Alpha / Beta / Gamma Simulators\n+ Resilience4j)"]
-        Payment --> Outbox["outbox / inbox"]
-        Payout --> Outbox
-        Webhook --> Outbox
-    end
-
-    Backend -->|JDBC / JPA / Flyway| DB[("PostgreSQL\nACID + Constraints")]
-    Outbox -->|Async Relay Worker| Consumers["Internal Event Consumers\n(Ledger / Risk / Audit)"]
+    Browser["User Browser"] -->|"HTTPS / UI"| Frontend["Operations Console SPA\n(React 18, TypeScript, Vite, Tailwind)\nPort 5173"]
+    Frontend -->|"REST/JSON + Bearer JWT\n+ Idempotency-Key"| Backend["PayShield Backend API & Workers\n(Java 21, Spring Boot 3.4.3 Modular Monolith)\nPort 8080"]
+    SimWebhook["Simulated Provider Webhook\n(HMAC-SHA256 + Timestamp)"] -->|"POST /api/v1/webhooks/*"| Backend
+    Backend -->|"JDBC / JPA / Flyway"| DB[("PostgreSQL 16\nACID Transactions & Constraints\nPort 5432")]
 ```
 
 ---
 
 ## 3. Backend Module Dependency Diagram
+
+Strict unidirectional DAG enforced by ArchUnit (`ArchitectureRulesTest`):
 
 ```mermaid
 flowchart TD
@@ -47,8 +52,7 @@ flowchart TD
     ops --> risk
     ops --> audit
 
-    risk --> payment
-    risk --> payout
+    risk --> outbox
     risk --> audit
     risk --> common
 
@@ -59,7 +63,6 @@ flowchart TD
     payout --> common
 
     recon --> payment
-    recon --> ledger
     recon --> audit
     recon --> common
 
@@ -75,6 +78,7 @@ flowchart TD
     payment --> audit
     payment --> common
 
+    ledger --> outbox
     ledger --> audit
     ledger --> common
 
@@ -92,9 +96,34 @@ flowchart TD
 
 ---
 
-## 4. Key Engineering Patterns
-1. **Idempotency-First Writes**: Payment creation uses a unique `(merchant_id, idempotency_key)` record with request-hash verification to prevent duplicate charges under retries or concurrency.
-2. **Uncertainty-Safe Orchestration**: Provider timeouts transition payments to `UNKNOWN` rather than `FAILED`, requiring explicit provider status verification before any retry or reconciliation decision.
-3. **Transactional Outbox & Inbox**: State transitions and outbox events commit atomically in PostgreSQL. Webhook and event consumers use `inbox_events` deduplication for idempotent processing.
-4. **Double-Entry Bookkeeping**: All money movement posts immutable, balanced journal transactions (`SUM(DEBIT) == SUM(CREDIT)`).
-5. **Maker-Checker Payout Governance**: Separation of duties is enforced in both application services and PostgreSQL `CHECK` constraints (`maker_user_id <> checker_user_id`).
+## 4. Frontend Route Architecture
+
+```mermaid
+flowchart LR
+    Login["/login\n(Public Auth)"] --> Guard{"ProtectedRoute\n(JWT Session Check)"}
+    Guard --> Shell["AppShell\n(Sidebar, Header, Theme, Role Context)"]
+
+    Shell --> Overview["/ (OverviewPage)"]
+    Shell --> Payments["/payments (PaymentsPage)"]
+    Shell --> PaymentDetail["/payments/:paymentId (PaymentDetailPage)"]
+    Shell --> Providers["/providers (ProvidersPage)"]
+    Shell --> Payouts["/payouts (PayoutsPage)"]
+    Shell --> Ledger["/ledger (LedgerPage)"]
+    Shell --> Recon["/reconciliation (ReconciliationPage)"]
+    Shell --> Risk["/risk (RiskPage)"]
+    Shell --> Health["/health (SystemHealthPage)"]
+    Shell --> Audit["/audit (AuditTrailPage)"]
+    Shell --> Admin["/admin (AdminPage)"]
+```
+
+---
+
+## 5. Highest-Risk Architectural Decisions & Verification Strategy
+
+| Risk Area | Architectural Decision | How It Will Be Tested |
+|---|---|---|
+| **Duplicate Payments Under Concurrency** | Scoped `UNIQUE (merchant_id, idempotency_key)` + SHA-256 request payload hash verification | Multi-threaded concurrency test (`concurrentIdempotentRequestsProduceSinglePayment`) + k6 `concurrent_idempotency` profile |
+| **False Failures on Provider Timeouts** | Timeouts transition to `UNKNOWN` (never `FAILED`); requires explicit provider `verifyStatus` before resolution | Integration test with `TIMEOUT_AFTER_PROCESSING` -> `UNKNOWN` -> `/verify` -> `SUCCEEDED` |
+| **Duplicate Webhook Financial Effects** | Constant-time HMAC-SHA256 + 300s replay window + `provider_events` & `inbox_events` deduplication | Integration test sending invalid signature (401), valid webhook (`PROCESSED`), and duplicate (`DUPLICATE`) |
+| **Unbalanced or Mutated Ledger** | Integer minor units (`long`), `SUM(DEBIT) == SUM(CREDIT)` check, `ledger_posting_references` uniqueness, reversal-only corrections | Unit/integration tests for unbalanced rejection, duplicate posting idempotency, reversal creation, and `FINANCIAL_AUDITOR` write block (403) |
+| **Payout Self-Approval & Bypass** | Service check + DB `CHECK (maker_user_id <> checker_user_id)` + `APPROVED` & kill-switch gate on execution | Integration tests verifying maker self-approval returns 403, unapproved execution returns 409, and kill switch returns 503 |

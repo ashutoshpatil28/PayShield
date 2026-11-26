@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, Outlet, useLocation } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
   AlertTriangle,
@@ -35,7 +35,13 @@ const NAV_ITEMS = [
 export function AppShell() {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'));
 
   const toggleTheme = () => {
@@ -44,7 +50,9 @@ export function AppShell() {
     document.documentElement.classList.toggle('dark', next);
   };
 
-  const currentNav = NAV_ITEMS.find((n) => n.to === location.pathname) || NAV_ITEMS[0];
+  const currentNav =
+    NAV_ITEMS.find((n) => (n.to === '/' ? location.pathname === '/' : location.pathname.startsWith(n.to))) ||
+    NAV_ITEMS[0];
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-navy-950 text-slate-900 dark:text-slate-100">
@@ -130,7 +138,7 @@ export function AppShell() {
 
             <button
               type="button"
-              onClick={logout}
+              onClick={handleLogout}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-200 dark:border-navy-700 hover:bg-slate-100 dark:hover:bg-navy-800"
             >
               <LogOut className="w-3.5 h-3.5" />

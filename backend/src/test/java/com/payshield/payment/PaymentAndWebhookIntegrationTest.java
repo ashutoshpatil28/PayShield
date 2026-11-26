@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.payshield.auth.AuthDtos;
 import com.payshield.auth.DemoSeedRunner;
+import com.payshield.ledger.JournalTransactionRepository;
+import com.payshield.ledger.LedgerPostingReferenceRepository;
 import com.payshield.outbox.OutboxEventRepository;
 import com.payshield.outbox.OutboxService;
 import com.payshield.provider.ProviderCode;
@@ -42,6 +44,9 @@ class PaymentAndWebhookIntegrationTest {
     @Autowired private OutboxService outboxService;
     @Autowired private OutboxEventRepository outboxEventRepository;
     @Autowired private PaymentRepository paymentRepository;
+    @Autowired private PaymentEventRepository paymentEventRepository;
+    @Autowired private LedgerPostingReferenceRepository ledgerPostingRefRepository;
+    @Autowired private JournalTransactionRepository journalTxRepository;
 
     @Value("${payshield.webhooks.alpha-secret}")
     private String alphaSecret;
@@ -239,5 +244,163 @@ class PaymentAndWebhookIntegrationTest {
         int published = outboxService.relayPendingEvents();
         assertThat(published).isGreaterThanOrEqualTo(0);
         assertThat(outboxEventRepository.count()).isGreaterThan(0);
+    }
+
+    @Test
+    void timeoutBeforeProcessingResolvesToFailedOnVerification() throws Exception {
+        mockMvc.perform(put("/api/v1/providers/PROVIDER_ALPHA/config")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":true,\"failureMode\":\"TIMEOUT_BEFORE_PROCESSING\",\"latencyMs\":5,\"failureRatePercent\":0,\"timeoutRatePercent\":0}"))
+                .andExpect(status().isOk());
+
+        String payload = objectMapper.writeValueAsString(new PaymentDtos.CreatePaymentRequest(
+                ACME_ID, "ORD-TBP-1", 30000L, "INR", ProviderCode.PROVIDER_ALPHA));
+        MvcResult created = mockMvc.perform(post("/api/v1/payments")
+                        .header("Authorization", "Bearer " + acmeToken)
+                        .header("Idempotency-Key", "tbp-" + UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("UNKNOWN"))
+                .andReturn();
+
+        String paymentId = objectMapper.readTree(created.getResponse().getContentAsString()).get("id").asText();
+
+        mockMvc.perform(post("/api/v1/payments/" + paymentId + "/verify")
+                        .header("Authorization", "Bearer " + acmeToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"));
+    }
+
+    @Test
+    void retriesDuplicateAndOutOfOrderWebhooksNeverCreateTwoFinancialEffects() throws Exception {
+        String idemKey = "single-effect-" + UUID.randomUUID();
+        String payload = objectMapper.writeValueAsString(new PaymentDtos.CreatePaymentRequest(
+                ACME_ID, "ORD-SINGLE-1", 200000L, "INR", ProviderCode.PROVIDER_ALPHA));
+
+        // 1. Create succeeded payment
+        MvcResult created = mockMvc.perform(post("/api/v1/payments")
+                        .header("Authorization", "Bearer " + acmeToken)
+                        .header("Idempotency-Key", idemKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("SUCCEEDED"))
+                .andReturn();
+        String paymentId = objectMapper.readTree(created.getResponse().getContentAsString()).get("id").asText();
+
+        // 2. Retry same payment creation with same Idempotency-Key
+        mockMvc.perform(post("/api/v1/payments")
+                        .header("Authorization", "Bearer " + acmeToken)
+                        .header("Idempotency-Key", idemKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.idempotentReplay").value(true));
+
+        // 3. Deliver duplicate PAYMENT_SUCCEEDED webhook
+        String dupEvtId = "evt_dup_" + UUID.randomUUID();
+        String succWh = "{\"eventId\":\"" + dupEvtId + "\",\"eventType\":\"PAYMENT_SUCCEEDED\",\"paymentId\":\""
+                + paymentId + "\",\"providerReference\":\"SIM_ALPHA_DUP\"}";
+        String ts = String.valueOf(Instant.now().getEpochSecond());
+        String succSig = WebhookService.computeHmacSha256(alphaSecret, ts + "." + succWh);
+        mockMvc.perform(post("/api/v1/webhooks/PROVIDER_ALPHA")
+                        .header("X-PayShield-Timestamp", ts)
+                        .header("X-PayShield-Signature", succSig)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(succWh))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PROCESSED"));
+
+        // 4. Deliver out-of-order PAYMENT_FAILED webhook for already SUCCEEDED payment
+        String oooEvtId = "evt_ooo_" + UUID.randomUUID();
+        String failWh = "{\"eventId\":\"" + oooEvtId + "\",\"eventType\":\"PAYMENT_FAILED\",\"paymentId\":\""
+                + paymentId + "\",\"reason\":\"Out-of-order late failure\"}";
+        String failSig = WebhookService.computeHmacSha256(alphaSecret, ts + "." + failWh);
+        mockMvc.perform(post("/api/v1/webhooks/PROVIDER_ALPHA")
+                        .header("X-PayShield-Timestamp", ts)
+                        .header("X-PayShield-Signature", failSig)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(failWh))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PROCESSED"));
+
+        // Relay outbox multiple times
+        outboxService.relayPendingEvents();
+        outboxService.relayPendingEvents();
+
+        // Verify payment remained SUCCEEDED and recorded out-of-order ignore event
+        var payment = paymentRepository.findById(UUID.fromString(paymentId)).orElseThrow();
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.SUCCEEDED);
+        var events = paymentEventRepository.findByPaymentIdOrderByCreatedAtAsc(UUID.fromString(paymentId));
+        assertThat(events.stream().anyMatch(e -> "WEBHOOK_IGNORED_OUT_OF_ORDER".equals(e.getEventType()))).isTrue();
+
+        // Verify EXACTLY ONE ledger posting reference exists for this payment
+        var postingRef = ledgerPostingRefRepository.findBySourceTypeAndSourceIdAndPostingType(
+                "PAYMENT", paymentId, "CAPTURE");
+        assertThat(postingRef).isPresent();
+        long matchingTxCount = journalTxRepository.findAll().stream()
+                .filter(tx -> tx.getReferenceCode().equals("PAYMENT:" + paymentId + ":CAPTURE"))
+                .count();
+        assertThat(matchingTxCount).isEqualTo(1L);
+    }
+
+    @Test
+    void providerCircuitBreakerOpensOnUnavailableAndRecovers() throws Exception {
+        // Configure PROVIDER_BETA to UNAVAILABLE
+        mockMvc.perform(put("/api/v1/providers/PROVIDER_BETA/config")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":true,\"failureMode\":\"UNAVAILABLE\",\"latencyMs\":0,\"failureRatePercent\":0,\"timeoutRatePercent\":0}"))
+                .andExpect(status().isOk());
+
+        // Trigger 10 failures to trip slidingWindowSize=10 circuit breaker
+        for (int i = 0; i < 10; i++) {
+            String payload = objectMapper.writeValueAsString(new PaymentDtos.CreatePaymentRequest(
+                    ACME_ID, "ORD-CB-" + i, 10000L, "INR", ProviderCode.PROVIDER_BETA));
+            mockMvc.perform(post("/api/v1/payments")
+                            .header("Authorization", "Bearer " + acmeToken)
+                            .header("Idempotency-Key", "cb-fail-" + i + "-" + UUID.randomUUID())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(payload))
+                    .andExpect(status().isCreated())
+                    .andExpect(jsonPath("$.status").value("FAILED"));
+        }
+
+        // Verify circuit breaker state is OPEN
+        MvcResult providersRes = mockMvc.perform(get("/api/v1/providers")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode providers = objectMapper.readTree(providersRes.getResponse().getContentAsString());
+        String betaState = "";
+        for (JsonNode p : providers) {
+            if ("PROVIDER_BETA".equals(p.get("providerCode").asText())) {
+                betaState = p.get("circuitBreakerState").asText();
+            }
+        }
+        assertThat(betaState).isEqualTo("OPEN");
+
+        // Recover PROVIDER_BETA -> NORMAL_SUCCESS and reset circuit breaker
+        mockMvc.perform(put("/api/v1/providers/PROVIDER_BETA/config")
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":true,\"failureMode\":\"NORMAL_SUCCESS\",\"latencyMs\":5,\"failureRatePercent\":0,\"timeoutRatePercent\":0}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/v1/providers/PROVIDER_BETA/circuit-breaker/reset")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.circuitBreakerState").value("CLOSED"));
+
+        String recoverPayload = objectMapper.writeValueAsString(new PaymentDtos.CreatePaymentRequest(
+                ACME_ID, "ORD-CB-RECOVER", 10000L, "INR", ProviderCode.PROVIDER_BETA));
+        mockMvc.perform(post("/api/v1/payments")
+                        .header("Authorization", "Bearer " + acmeToken)
+                        .header("Idempotency-Key", "cb-rec-" + UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(recoverPayload))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("SUCCEEDED"));
     }
 }

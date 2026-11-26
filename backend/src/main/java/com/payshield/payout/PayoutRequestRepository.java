@@ -33,4 +33,6 @@ public interface PayoutRequestRepository extends JpaRepository<PayoutRequestEnti
     );
 
     long countByStatus(PayoutStatus status);
+
+    long countByMerchantIdAndCreatedAtAfter(UUID merchantId, Instant since);
 }

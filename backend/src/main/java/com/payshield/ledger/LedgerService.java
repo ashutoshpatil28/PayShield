@@ -78,6 +78,14 @@ public class LedgerService {
             Instant updatedAt
     ) {}
 
+    public record FinancialSummaryDto(
+            long totalTransactions,
+            long totalDebitsMinor,
+            long totalCreditsMinor,
+            boolean balanced,
+            Map<String, Long> totalsByAccountType
+    ) {}
+
     @Transactional
     public JournalTransactionDto postJournal(
             String sourceType,
@@ -212,6 +220,24 @@ public class LedgerService {
                     );
                 })
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public FinancialSummaryDto getFinancialSummary() {
+        long debits = 0L;
+        long credits = 0L;
+        for (JournalLineEntity l : lineRepository.findAll()) {
+            if (l.getEntryType() == JournalLineEntity.EntryType.DEBIT) {
+                debits = Math.addExact(debits, l.getAmountMinor());
+            } else {
+                credits = Math.addExact(credits, l.getAmountMinor());
+            }
+        }
+        Map<String, Long> byType = new LinkedHashMap<>();
+        for (AccountBalanceDto b : listBalances()) {
+            byType.merge(b.accountType().name(), b.balanceMinor(), Math::addExact);
+        }
+        return new FinancialSummaryDto(txRepository.count(), debits, credits, debits == credits, byType);
     }
 
     @Transactional(readOnly = true)

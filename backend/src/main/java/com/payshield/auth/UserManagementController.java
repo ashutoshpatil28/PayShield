@@ -23,15 +23,18 @@ public class UserManagementController {
 
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
+    private final RefreshTokenRepository refreshTokenRepository;
     private final PasswordEncoder passwordEncoder;
     private final AuditService auditService;
 
     public UserManagementController(UserRepository userRepository,
                                     RoleRepository roleRepository,
+                                    RefreshTokenRepository refreshTokenRepository,
                                     PasswordEncoder passwordEncoder,
                                     AuditService auditService) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
+        this.refreshTokenRepository = refreshTokenRepository;
         this.passwordEncoder = passwordEncoder;
         this.auditService = auditService;
     }
@@ -120,6 +123,25 @@ public class UserManagementController {
                 user.getRoles().stream().map(RoleEntity::getName).collect(Collectors.toSet()),
                 user.isActive(), user.isDemoUser(), user.getCreatedAt()
         );
+    }
+
+    @PostMapping("/{userId}/revoke-sessions")
+    @Transactional
+    public Map<String, Object> revokeSessions(
+            @PathVariable UUID userId,
+            @AuthenticationPrincipal PayShieldUserPrincipal actor,
+            HttpServletRequest httpReq
+    ) {
+        UserEntity user = userRepository.findById(userId)
+                .orElseThrow(() -> new DomainException("USER_NOT_FOUND", "User not found", HttpStatus.NOT_FOUND));
+        int revokedCount = refreshTokenRepository.revokeAllActiveByUserId(user.getId(), Instant.now());
+        auditService.record(
+                actor.getUserId(), actor.getEmail(), String.join(",", actor.getRoles()),
+                "USER_SESSIONS_REVOKED", "USER", user.getId().toString(),
+                AuditOutcome.SUCCESS, httpReq.getRemoteAddr(),
+                "{\"revokedTokens\":" + revokedCount + "}"
+        );
+        return Map.of("userId", user.getId(), "revokedTokens", revokedCount);
     }
 
     @PatchMapping("/{userId}/status")

@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { Plus, Search } from 'lucide-react';
+import { ArrowUpDown, Plus, Search } from 'lucide-react';
 import { apiFetch, ApiError } from '../lib/api';
 import { formatMinorMoney, formatUtcTimestamp } from '../lib/format';
 import { StatusBadge } from '../components/StatusBadge';
+import { PaginationControls } from '../components/PaginationControls';
 import { useAuth } from '../lib/auth';
 
 interface Payment {
@@ -37,6 +38,9 @@ export function PaymentsPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [providerFilter, setProviderFilter] = useState('');
+  const [sortBy, setSortBy] = useState('createdAt');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(0);
   const [showModal, setShowModal] = useState(false);
 
@@ -52,10 +56,16 @@ export function PaymentsPage() {
   });
 
   const { data, isLoading } = useQuery({
-    queryKey: ['payments', page, statusFilter, search],
+    queryKey: ['payments', page, statusFilter, providerFilter, search, sortBy, sortDir],
     queryFn: () => {
-      const params = new URLSearchParams({ page: String(page), size: '20' });
+      const params = new URLSearchParams({
+        page: String(page),
+        size: '15',
+        sortBy,
+        sortDir,
+      });
       if (statusFilter) params.set('status', statusFilter);
+      if (providerFilter) params.set('provider', providerFilter);
       if (search.trim()) params.set('search', search.trim());
       return apiFetch<PagedPayments>(`/api/v1/payments?${params.toString()}`);
     },
@@ -86,6 +96,16 @@ export function PaymentsPage() {
     },
   });
 
+  const toggleSort = (col: string) => {
+    if (sortBy === col) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(col);
+      setSortDir('desc');
+    }
+    setPage(0);
+  };
+
   const canCreate = hasRole('PLATFORM_ADMIN', 'MERCHANT_ADMIN', 'OPERATIONS_ANALYST');
 
   return (
@@ -114,6 +134,7 @@ export function PaymentsPage() {
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
           <input
             type="text"
+            aria-label="Search payments"
             placeholder="Search order ref or provider ref..."
             value={search}
             onChange={(e) => {
@@ -124,6 +145,7 @@ export function PaymentsPage() {
           />
         </div>
         <select
+          aria-label="Filter by status"
           value={statusFilter}
           onChange={(e) => {
             setStatusFilter(e.target.value);
@@ -137,51 +159,87 @@ export function PaymentsPage() {
           <option value="FAILED">FAILED</option>
           <option value="PROCESSING">PROCESSING</option>
         </select>
+        <select
+          aria-label="Filter by provider"
+          value={providerFilter}
+          onChange={(e) => {
+            setProviderFilter(e.target.value);
+            setPage(0);
+          }}
+          className="px-3 py-2 rounded-lg bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 text-sm"
+        >
+          <option value="">All Providers</option>
+          <option value="PROVIDER_ALPHA">PROVIDER_ALPHA</option>
+          <option value="PROVIDER_BETA">PROVIDER_BETA</option>
+          <option value="PROVIDER_GAMMA">PROVIDER_GAMMA</option>
+        </select>
       </div>
 
-      <div className="bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 rounded-xl overflow-x-auto">
-        <table className="w-full text-sm text-left">
-          <thead className="bg-slate-50 dark:bg-navy-800/60 text-xs uppercase text-slate-500">
-            <tr>
-              <th className="px-4 py-3">Order Ref</th>
-              <th className="px-4 py-3">Amount</th>
-              <th className="px-4 py-3">Provider</th>
-              <th className="px-4 py-3">Provider Ref</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Created</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-200 dark:divide-navy-700">
-            {isLoading && (
+      <div className="bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 rounded-xl overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-slate-50 dark:bg-navy-800/60 text-xs uppercase text-slate-500">
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-slate-500">Loading payments...</td>
+                <th className="px-4 py-3">Order Ref</th>
+                <th className="px-4 py-3">
+                  <button type="button" onClick={() => toggleSort('amountMinor')} className="inline-flex items-center gap-1 hover:text-slate-900 dark:hover:text-white">
+                    Amount <ArrowUpDown className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-4 py-3">Provider</th>
+                <th className="px-4 py-3">Provider Ref</th>
+                <th className="px-4 py-3">
+                  <button type="button" onClick={() => toggleSort('status')} className="inline-flex items-center gap-1 hover:text-slate-900 dark:hover:text-white">
+                    Status <ArrowUpDown className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="px-4 py-3">
+                  <button type="button" onClick={() => toggleSort('createdAt')} className="inline-flex items-center gap-1 hover:text-slate-900 dark:hover:text-white">
+                    Created <ArrowUpDown className="w-3 h-3" />
+                  </button>
+                </th>
               </tr>
-            )}
-            {!isLoading && data?.items.length === 0 && (
-              <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-slate-500">No payments recorded yet.</td>
-              </tr>
-            )}
-            {data?.items.map((p) => (
-              <tr key={p.id} className="hover:bg-slate-50 dark:hover:bg-navy-800/40">
-                <td className="px-4 py-3 font-medium">
-                  <Link to={`/payments/${p.id}`} className="text-emerald-600 dark:text-emerald-400 hover:underline font-mono">
-                    {p.merchantOrderRef}
-                  </Link>
-                </td>
-                <td className="px-4 py-3 tabular-nums font-medium">{formatMinorMoney(p.amountMinor, p.currency)}</td>
-                <td className="px-4 py-3 font-mono text-xs">{p.selectedProvider}</td>
-                <td className="px-4 py-3 font-mono text-xs text-slate-500">{p.providerReference || '—'}</td>
-                <td className="px-4 py-3"><StatusBadge value={p.status} /></td>
-                <td className="px-4 py-3 text-xs text-slate-500">{formatUtcTimestamp(p.createdAt)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-slate-200 dark:divide-navy-700">
+              {isLoading && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">Loading payments...</td>
+                </tr>
+              )}
+              {!isLoading && data?.items.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">No payments match your filters.</td>
+                </tr>
+              )}
+              {data?.items.map((p) => (
+                <tr key={p.id} className="hover:bg-slate-50 dark:hover:bg-navy-800/40">
+                  <td className="px-4 py-3 font-medium">
+                    <Link to={`/payments/${p.id}`} className="text-emerald-600 dark:text-emerald-400 hover:underline font-mono">
+                      {p.merchantOrderRef}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-3 tabular-nums font-medium">{formatMinorMoney(p.amountMinor, p.currency)}</td>
+                  <td className="px-4 py-3 font-mono text-xs">{p.selectedProvider}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-500">{p.providerReference || '—'}</td>
+                  <td className="px-4 py-3"><StatusBadge value={p.status} /></td>
+                  <td className="px-4 py-3 text-xs text-slate-500">{formatUtcTimestamp(p.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {data && (
+          <PaginationControls
+            page={data.page}
+            totalPages={data.totalPages}
+            totalElements={data.totalElements}
+            onPageChange={setPage}
+          />
+        )}
       </div>
 
       {showModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-md bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 rounded-xl p-6 space-y-4">
             <h2 className="text-lg font-semibold">Initiate Simulated Payment</h2>
             {formError && <div className="p-2.5 rounded bg-rose-500/10 text-rose-400 text-xs">{formError}</div>}

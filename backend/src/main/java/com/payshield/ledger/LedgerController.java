@@ -24,6 +24,12 @@ public class LedgerController {
 
     public record ReverseTransactionRequest(@NotBlank String reason) {}
 
+    @GetMapping("/summary")
+    @PreAuthorize("hasAnyRole('PLATFORM_ADMIN','OPERATIONS_ANALYST','FINANCIAL_AUDITOR')")
+    public LedgerService.FinancialSummaryDto summary() {
+        return ledgerService.getFinancialSummary();
+    }
+
     @GetMapping("/balances")
     @PreAuthorize("hasAnyRole('PLATFORM_ADMIN','OPERATIONS_ANALYST','FINANCIAL_AUDITOR')")
     public List<LedgerService.AccountBalanceDto> balances() {

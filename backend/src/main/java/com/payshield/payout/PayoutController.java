@@ -67,6 +67,8 @@ public class PayoutController {
         return payoutService.execute(payoutId, actor, httpReq.getRemoteAddr());
     }
 
+    public record AllowlistRequest(boolean allowlisted) {}
+
     @GetMapping("/beneficiaries")
     @PreAuthorize("hasAnyRole('PLATFORM_ADMIN','MERCHANT_ADMIN','OPERATIONS_ANALYST','PAYOUT_MAKER','PAYOUT_CHECKER')")
     public List<BeneficiaryEntity> beneficiaries(
@@ -74,6 +76,28 @@ public class PayoutController {
             @RequestParam(required = false) UUID merchantId
     ) {
         return payoutService.listBeneficiaries(actor, merchantId);
+    }
+
+    @PostMapping("/beneficiaries")
+    @ResponseStatus(HttpStatus.CREATED)
+    @PreAuthorize("hasAnyRole('PLATFORM_ADMIN','MERCHANT_ADMIN','PAYOUT_MAKER')")
+    public BeneficiaryEntity createBeneficiary(
+            @Valid @RequestBody PayoutService.CreateBeneficiaryRequest req,
+            @AuthenticationPrincipal PayShieldUserPrincipal actor,
+            HttpServletRequest httpReq
+    ) {
+        return payoutService.createBeneficiary(req, actor, httpReq.getRemoteAddr());
+    }
+
+    @PatchMapping("/beneficiaries/{beneficiaryId}/allowlist")
+    @PreAuthorize("hasAnyRole('PLATFORM_ADMIN','PAYOUT_CHECKER')")
+    public BeneficiaryEntity updateAllowlist(
+            @PathVariable UUID beneficiaryId,
+            @RequestBody AllowlistRequest req,
+            @AuthenticationPrincipal PayShieldUserPrincipal actor,
+            HttpServletRequest httpReq
+    ) {
+        return payoutService.setBeneficiaryAllowlist(beneficiaryId, req.allowlisted(), actor, httpReq.getRemoteAddr());
     }
 
     @GetMapping("/kill-switch")

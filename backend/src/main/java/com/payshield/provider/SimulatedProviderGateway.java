@@ -79,6 +79,9 @@ public class SimulatedProviderGateway implements PaymentProvider {
             metrics.failureCount.incrementAndGet();
             return new ChargeResult(Outcome.UNAVAILABLE, null, 0,
                     "CIRCUIT_BREAKER_OPEN", "Provider circuit breaker is OPEN");
+        } catch (ProviderUnavailableSignal ex) {
+            return new ChargeResult(Outcome.UNAVAILABLE, null, cfg.getLatencyMs(),
+                    "PROVIDER_UNAVAILABLE", ex.getMessage());
         }
     }
 

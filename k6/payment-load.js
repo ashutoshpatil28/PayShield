@@ -31,6 +31,9 @@ export const options = {
 };
 
 export function setup() {
+  if (PROFILE === 'concurrent_idempotency') {
+    http.setResponseCallback(http.expectedStatuses(200, 201, 409));
+  }
   const loginRes = http.post(
     `${BASE_URL}/api/v1/auth/login`,
     JSON.stringify({
@@ -44,6 +47,9 @@ export function setup() {
 }
 
 export default function (data) {
+  if (PROFILE === 'concurrent_idempotency') {
+    http.setResponseCallback(http.expectedStatuses(200, 201, 409));
+  }
   const idemKey =
     PROFILE === 'concurrent_idempotency'
       ? 'k6-shared-idempotency-key-001'

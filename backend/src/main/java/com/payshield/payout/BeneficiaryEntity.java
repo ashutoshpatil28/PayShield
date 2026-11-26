@@ -54,4 +54,8 @@ public class BeneficiaryEntity {
     public boolean isAllowlisted() { return allowlisted; }
     public boolean isDemoData() { return demoData; }
     public Instant getCreatedAt() { return createdAt; }
+
+    public void setAllowlisted(boolean allowlisted) {
+        this.allowlisted = allowlisted;
+    }
 }

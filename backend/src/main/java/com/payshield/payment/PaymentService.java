@@ -34,6 +34,7 @@ public class PaymentService {
     private final PaymentAttemptRepository attemptRepository;
     private final PaymentEventRepository eventRepository;
     private final IdempotencyRecordRepository idempotencyRepository;
+    private final IdempotencyLockService idempotencyLockService;
     private final MerchantService merchantService;
     private final SimulatedProviderGateway providerGateway;
     private final OutboxService outboxService;
@@ -44,6 +45,7 @@ public class PaymentService {
             PaymentAttemptRepository attemptRepository,
             PaymentEventRepository eventRepository,
             IdempotencyRecordRepository idempotencyRepository,
+            IdempotencyLockService idempotencyLockService,
             MerchantService merchantService,
             SimulatedProviderGateway providerGateway,
             OutboxService outboxService,
@@ -53,6 +55,7 @@ public class PaymentService {
         this.attemptRepository = attemptRepository;
         this.eventRepository = eventRepository;
         this.idempotencyRepository = idempotencyRepository;
+        this.idempotencyLockService = idempotencyLockService;
         this.merchantService = merchantService;
         this.providerGateway = providerGateway;
         this.outboxService = outboxService;
@@ -81,23 +84,18 @@ public class PaymentService {
 
         String requestHash = hashRequest(req, selectedProvider);
 
-        // Idempotency lookup
-        var existingIdem = idempotencyRepository.findByMerchantIdAndIdempotencyKey(req.merchantId(), trimmedKey);
-        if (existingIdem.isPresent()) {
-            return handleExistingIdempotency(existingIdem.get(), requestHash);
-        }
-
-        IdempotencyRecordEntity idemRecord;
+        // Idempotency claim in isolated REQUIRES_NEW transaction
+        IdempotencyLockService.ClaimResult claim;
         try {
-            idemRecord = idempotencyRepository.saveAndFlush(new IdempotencyRecordEntity(
-                    UUID.randomUUID(), req.merchantId(), trimmedKey, requestHash, Instant.now()
-            ));
-        } catch (DataIntegrityViolationException ex) {
-            IdempotencyRecordEntity raced = idempotencyRepository
-                    .findByMerchantIdAndIdempotencyKey(req.merchantId(), trimmedKey)
-                    .orElseThrow(() -> ex);
+            claim = idempotencyLockService.claimOrGet(req.merchantId(), trimmedKey, requestHash);
+        } catch (IdempotencyLockService.ConcurrentIdempotencyRaceException race) {
+            IdempotencyRecordEntity raced = idempotencyLockService.getValidatedExisting(req.merchantId(), trimmedKey, requestHash);
             return handleExistingIdempotency(raced, requestHash);
         }
+        if (claim.alreadyExisted()) {
+            return handleExistingIdempotency(claim.record(), requestHash);
+        }
+        IdempotencyRecordEntity idemRecord = claim.record();
 
         Instant now = Instant.now();
         UUID paymentId = UUID.randomUUID();
@@ -297,8 +295,28 @@ public class PaymentService {
             default -> "createdAt";
         };
         var pageable = PageRequest.of(Math.max(0, page), Math.min(Math.max(1, size), 100), Sort.by(dir, safeSort));
+        org.springframework.data.jpa.domain.Specification<PaymentEntity> spec = (root, query, cb) -> {
+            List<jakarta.persistence.criteria.Predicate> predicates = new java.util.ArrayList<>();
+            if (effectiveMerchantId != null) {
+                predicates.add(cb.equal(root.get("merchantId"), effectiveMerchantId));
+            }
+            if (status != null) {
+                predicates.add(cb.equal(root.get("status"), status));
+            }
+            if (normProvider != null) {
+                predicates.add(cb.equal(root.get("selectedProvider"), normProvider));
+            }
+            if (normSearch != null) {
+                String pattern = "%" + normSearch.toLowerCase() + "%";
+                predicates.add(cb.or(
+                        cb.like(cb.lower(root.get("merchantOrderRef")), pattern),
+                        cb.like(cb.lower(cb.coalesce(root.get("providerReference"), "")), pattern)
+                ));
+            }
+            return cb.and(predicates.toArray(new jakarta.persistence.criteria.Predicate[0]));
+        };
         return PagedResponse.from(
-                paymentRepository.search(effectiveMerchantId, status, normProvider, normSearch, pageable)
+                paymentRepository.findAll(spec, pageable)
                         .map(p -> PaymentDtos.PaymentDto.from(p, false))
         );
     }

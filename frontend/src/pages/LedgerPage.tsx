@@ -1,7 +1,11 @@
+import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RotateCcw } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { formatMinorMoney, formatUtcTimestamp } from '../lib/format';
+import { StatusBadge } from '../components/StatusBadge';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { PaginationControls } from '../components/PaginationControls';
 import { useAuth } from '../lib/auth';
 
 interface AccountBalance {
@@ -11,6 +15,13 @@ interface AccountBalance {
   accountType: string;
   currency: string;
   balanceMinor: number;
+}
+
+interface FinancialSummary {
+  totalTransactions: number;
+  totalDebitsMinor: number;
+  totalCreditsMinor: number;
+  balanced: boolean;
 }
 
 interface JournalTx {
@@ -31,9 +42,23 @@ interface JournalTx {
   }>;
 }
 
+interface PagedJournal {
+  items: JournalTx[];
+  page: number;
+  totalElements: number;
+  totalPages: number;
+}
+
 export function LedgerPage() {
   const { hasRole } = useAuth();
   const qc = useQueryClient();
+  const [page, setPage] = useState(0);
+  const [reverseTxId, setReverseTxId] = useState<string | null>(null);
+
+  const { data: summary } = useQuery({
+    queryKey: ['ledger-summary'],
+    queryFn: () => apiFetch<FinancialSummary>('/api/v1/ledger/summary'),
+  });
 
   const { data: balances } = useQuery({
     queryKey: ['ledger-balances'],
@@ -41,8 +66,8 @@ export function LedgerPage() {
   });
 
   const { data: txs } = useQuery({
-    queryKey: ['ledger-txs'],
-    queryFn: () => apiFetch<{ items: JournalTx[] }>('/api/v1/ledger/transactions?size=30'),
+    queryKey: ['ledger-txs', page],
+    queryFn: () => apiFetch<PagedJournal>(`/api/v1/ledger/transactions?page=${page}&size=15`),
   });
 
   const reverseMutation = useMutation({
@@ -54,16 +79,27 @@ export function LedgerPage() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['ledger-balances'] });
       qc.invalidateQueries({ queryKey: ['ledger-txs'] });
+      qc.invalidateQueries({ queryKey: ['ledger-summary'] });
+      setReverseTxId(null);
     },
   });
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Double-Entry Financial Ledger</h1>
-        <p className="text-sm text-slate-500 dark:text-slate-400">
-          Immutable journal transactions (SUM(DEBIT) == SUM(CREDIT)) and real-time account balances
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Double-Entry Financial Ledger</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            Immutable journal transactions (SUM(DEBIT) == SUM(CREDIT)) and real-time account balances
+          </p>
+        </div>
+        {summary && (
+          <div className="flex items-center gap-3 px-4 py-2 rounded-xl bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 text-xs">
+            <span>Debits: <strong className="tabular-nums">{formatMinorMoney(summary.totalDebitsMinor)}</strong></span>
+            <span>Credits: <strong className="tabular-nums">{formatMinorMoney(summary.totalCreditsMinor)}</strong></span>
+            <StatusBadge value={summary.balanced ? 'SUCCEEDED' : 'FAILED'} />
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -99,7 +135,7 @@ export function LedgerPage() {
               {hasRole('PLATFORM_ADMIN') && !tx.reversalOfTxId && (
                 <button
                   type="button"
-                  onClick={() => reverseMutation.mutate(tx.id)}
+                  onClick={() => setReverseTxId(tx.id)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 dark:border-navy-700 text-xs hover:bg-slate-100 dark:hover:bg-navy-800"
                 >
                   <RotateCcw className="w-3 h-3" /> Post Reversal
@@ -121,7 +157,28 @@ export function LedgerPage() {
             </div>
           </div>
         ))}
+        {txs && txs.totalElements > 0 && (
+          <div className="bg-white dark:bg-navy-900 border border-slate-200 dark:border-navy-700 rounded-xl">
+            <PaginationControls
+              page={txs.page}
+              totalPages={txs.totalPages}
+              totalElements={txs.totalElements}
+              onPageChange={setPage}
+            />
+          </div>
+        )}
       </div>
+
+      <ConfirmDialog
+        open={!!reverseTxId}
+        title="Post Reversal Journal Transaction?"
+        description="Historical journal entries are immutable. This will post a new balanced reversal transaction offsetting the original debits and credits."
+        confirmLabel="Post Reversal"
+        destructive
+        loading={reverseMutation.isPending}
+        onConfirm={() => reverseTxId && reverseMutation.mutate(reverseTxId)}
+        onCancel={() => setReverseTxId(null)}
+      />
     </div>
   );
 }

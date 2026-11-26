@@ -14,7 +14,7 @@ test('login, navigate operations console, and initiate payment', async ({ page }
   await page.getByRole('button', { name: /Initiate Payment/i }).click();
   await page.getByRole('button', { name: /Submit Payment/i }).click();
 
-  await expect(page.getByText('SUCCEEDED').first()).toBeVisible();
+  await expect(page.locator('tbody').getByText('SUCCEEDED').first()).toBeVisible();
 
   // Navigate to Ledger & Audit Trail
   await page.getByRole('link', { name: 'Ledger' }).click();

@@ -30,6 +30,8 @@ class LedgerAndReconciliationTest {
     private static final UUID ACME_ID = UUID.fromString("22222222-2222-2222-2222-222222222201");
 
     @Autowired private LedgerService ledgerService;
+    @Autowired private JournalTransactionRepository journalTxRepository;
+    @Autowired private com.payshield.reconciliation.ReconciliationCaseRepository reconCaseRepository;
     @Autowired private MockMvc mockMvc;
     @Autowired private ObjectMapper objectMapper;
 
@@ -115,9 +117,17 @@ class LedgerAndReconciliationTest {
         String providerRef = objectMapper.readTree(payRes.getResponse().getContentAsString())
                 .get("providerReference").asText();
 
-        // Upload CSV with 1 amount mismatch + 1 unknown ref
+        // Snapshot ledger balances and transaction count BEFORE reconciliation
+        long txCountBefore = journalTxRepository.count();
+        var balancesBefore = ledgerService.listBalances().stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        LedgerService.AccountBalanceDto::accountCode,
+                        LedgerService.AccountBalanceDto::balanceMinor));
+
+        // Upload CSV with amount mismatch, fee mismatch (duplicate ref), and unknown ref
         String csv = "provider_reference,merchant_order_ref,amount_minor,fee_minor,currency,settlement_date\n"
                 + providerRef + ",ORD-RECON-1,9500,200,INR,2026-11-26\n"
+                + providerRef + ",ORD-RECON-1,10000,999,INR,2026-11-26\n"
                 + "SIM_UNKNOWN_REF_404,ORD-MISSING,5000,100,INR,2026-11-26\n";
 
         String reqBody = objectMapper.writeValueAsString(new com.payshield.reconciliation.ReconciliationController.UploadCsvRequest(
@@ -128,9 +138,24 @@ class LedgerAndReconciliationTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(reqBody))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.file.totalRecords").value(2))
-                .andExpect(jsonPath("$.file.unmatchedRecords").value(2))
-                .andExpect(jsonPath("$.casesCreated").value(2));
+                .andExpect(jsonPath("$.file.totalRecords").value(3))
+                .andExpect(jsonPath("$.file.unmatchedRecords").value(3))
+                .andExpect(jsonPath("$.casesCreated").value(3));
+
+        // Verify ledger was NEVER silently altered by reconciliation discrepancies
+        assertThat(journalTxRepository.count()).isEqualTo(txCountBefore);
+        var balancesAfter = ledgerService.listBalances().stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        LedgerService.AccountBalanceDto::accountCode,
+                        LedgerService.AccountBalanceDto::balanceMinor));
+        assertThat(balancesAfter).isEqualTo(balancesBefore);
+        assertThat(reconCaseRepository.count()).isGreaterThanOrEqualTo(3);
+
+        // Verify financial summary confirms SUM(DEBIT) == SUM(CREDIT)
+        mockMvc.perform(get("/api/v1/ledger/summary")
+                        .header("Authorization", "Bearer " + opsToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.balanced").value(true));
 
         // Duplicate CSV upload is rejected
         mockMvc.perform(post("/api/v1/reconciliation/files")
